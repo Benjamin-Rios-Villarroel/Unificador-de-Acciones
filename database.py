@@ -3,7 +3,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
 # Definimos la ubicación del archivo de base de datos
-SQLALCHEMY_DATABASE_URL = "sqlite:///./acciones.db"
+SQLALCHEMY_DATABASE_URL = "sqlite:///./inversiones.db"
 
 # Creamos el motor de conexión
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
@@ -14,26 +14,52 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 # Clase base para nuestras tablas
 Base = declarative_base()
 
-# Definición de la tabla
-class Transaccion(Base):
-    __tablename__ = "transacciones"
-
+# Tabla para las transacciones de acciones
+class Transacciones_acciones(Base):
+    __tablename__ = "transacciones_acciones"
     id = Column(Integer, primary_key=True, index=True)
     fecha = Column(String)              # ISO 8601: YYYY-MM-DD
-    broker = Column(String)             # Ej: "Rational", "BancoEstado"
-    tipo_activo = Column(String)        # "accion" o "divisa"
+    broker = Column(String)             # Ej: "Racional", "Zesty"
     tipo_transaccion = Column(String)   # "compra" o "venta"
-    ticker = Column(String)             # Ej: "AAPL" o "USD/CLP"
+    ticker = Column(String)             # Ej: "AAPL"
     monto_total = Column(Float)         # Dinero total en DÓLARES (USD)
-    precio_unitario = Column(Float)     # Precio de 1 accion (USD) o valor del dolar (CLP)
-    cantidad = Column(Float)            # Cantidad calculada de activos
+    precio = Column(Float)              # Precio de 1 accion (USD)
+    cantidad = Column(Float)            # Cantidad de acciones
 
-class IngresoPasivo(Base):
+# Tabla para las transacciones de dólares y pesos
+class Trasacciones_divisas(Base):
+    __tablename__ = "transacciones_divisas"
+    id = Column(Integer, primary_key=True, index=True)
+    fecha = Column(String)              # ISO 8601: YYYY-MM-DD
+    tipo_transaccion = Column(String)   # "compra" o "venta"
+    monto_total = Column(Float)         # Dinero total en DÓLARES (CLP)
+    precio = Column(Float)              # Precio de 1 dólar (CLP)
+    cantidad = Column(Float)            # Cantidad calculada de dólares (USD)
+
+# Tabla para los dividendos e interéses
+class Ingreso_pasivo(Base):
     __tablename__ = "ingresos_pasivos"
-
     id = Column(Integer, primary_key=True, index=True)
     fecha = Column(String)          # ISO 8601: YYYY-MM-DD
-    broker = Column(String)         # Ej: "Rational"
-    tipo_ingreso = Column(String)   # "dividendo" o "interes"
-    ticker = Column(String)         # Ej: "AAPL" o "Cuenta Premium"
-    monto = Column(Float)           # Monto antes de impuestos (USD)
+    broker = Column(String)         # Ej: "Racional", "Zesty"
+    tipo_ingreso = Column(String)   # "dividendo" o "interés"
+    ticker = Column(String)         # Ej: "AAPL" o "boost" o "interés"
+    monto = Column(Float)           # Monto (USD)
+
+# Tabla para los montos a final de mes
+class Resumen_mensual(Base):
+    __tablename__ = "resumen_mensual"
+    id = Column(Integer, primary_key=True, index=True)
+    fecha = Column(String)          # YYYY-MM
+    broker = Column(String)         # Ej: "Racional", "Zesty"
+    monto_pesos = Column(Float)     # Cantidad mensual en pesos
+    monto_dolates = Column(Float)   # Cantidad mensual en dólares
+
+class Historico_diario(Base):
+    __tablename__ = "historico_diario"
+    fecha = Column(String)          # YYYY-MM-DD
+    broker = Column(String)         # Ej: "Racional", "Zesty"
+    ticker = Column(String)         # Ej: "AAPL"
+    precio_cierre = Column(Float)   # Cierre diario 
+    cantidad = Column(Float)        # Cantidad de acciones en portafolio
+    valor = Column(Float)           # Valor de las acciones
