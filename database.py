@@ -31,10 +31,11 @@ class Trasacciones_divisas(Base):
     __tablename__ = "transacciones_divisas"
     id = Column(Integer, primary_key=True, index=True)
     fecha = Column(String)              # ISO 8601: YYYY-MM-DD
+    broker = Column(String)             # Ej: "Racional", "Zesty"
     tipo_transaccion = Column(String)   # "compra" o "venta"
     monto_total = Column(Float)         # Dinero total en DÓLARES (CLP)
     precio = Column(Float)              # Precio de 1 dólar (CLP)
-    cantidad = Column(Float)            # Cantidad calculada de dólares (USD)
+    cantidad = Column(Float)            # Cantidad de dólares (USD)
 
 # Tabla para los dividendos e interéses
 class Ingreso_pasivo(Base):
@@ -53,10 +54,11 @@ class Resumen_mensual(Base):
     fecha = Column(String)          # YYYY-MM
     broker = Column(String)         # Ej: "Racional", "Zesty"
     monto_pesos = Column(Float)     # Cantidad mensual en pesos
-    monto_dolates = Column(Float)   # Cantidad mensual en dólares
+    monto_dolares = Column(Float)   # Cantidad mensual en dólares
 
 class Historico_diario(Base):
     __tablename__ = "historico_diario"
+    id = Column(Integer, primary_key=True, index=True)
     fecha = Column(String)          # YYYY-MM-DD
     broker = Column(String)         # Ej: "Racional", "Zesty"
     ticker = Column(String)         # Ej: "AAPL"
