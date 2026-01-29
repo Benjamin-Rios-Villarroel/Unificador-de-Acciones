@@ -1,8 +1,8 @@
 from fastapi import FastAPI, Depends
-import yfinance as yf
 from sqlalchemy.orm import Session
 import database
 
+# Crea las tablas al iniciar el servidor
 database.Base.metadata.create_all(bind=database.engine)
 
 app = FastAPI()
