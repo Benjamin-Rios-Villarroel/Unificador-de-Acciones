@@ -42,9 +42,9 @@ def mostrar_tabla_estilizada(df, tipo_tabla="acciones"):
 
     configs = {
         "acciones": {"order": ["fecha", "broker", "tipo_transaccion", "ticker", "monto_total", "precio", "cantidad"],
-                     "config": {"monto_total": st.column_config.NumberColumn("Monto USD", format="$ %.2f"), "id": None, "cantidad": st.column_config.NumberColumn("Cant.", format="%.8f")}},
+                     "config": {"monto_total": st.column_config.NumberColumn("Monto USD", format="$ %.2f"), "precio": st.column_config.NumberColumn("Precio USD", format="$ %.2f"), "id": None, "cantidad": st.column_config.NumberColumn("Cant.", format="%.8f")}},
         "divisas": {"order": ["fecha", "broker", "tipo_transaccion", "monto_total", "precio", "cantidad"],
-                    "config": {"monto_total": st.column_config.NumberColumn("Monto CLP", format="$ %.0f"), "id": None}},
+                    "config": {"monto_total": st.column_config.NumberColumn("Monto CLP", format="$ %.0f"), "precio": st.column_config.NumberColumn("Cambio CLP", format="$ %.2f"), "cantidad": st.column_config.NumberColumn("Cantidad USD", format="$ %.2f"), "id": None}},
         "pasivos": {"order": ["fecha", "broker", "tipo_ingreso", "ticker", "monto"],
                     "config": {"monto": st.column_config.NumberColumn("Monto USD", format="$ %.2f"), "id": None}},
         "resumen_mensual": {"order": ["fecha", "broker", "monto_pesos", "monto_dolares"],
@@ -218,25 +218,43 @@ with tab_graficos:
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
             ver_acciones = st.checkbox("Ver Acciones", value=True)
 
+        # Preparación de datos del gráfico
+        df_p = df_r[df_r['broker'].isin(br_sel)].groupby('fecha').sum(numeric_only=True).reset_index()
+
+        # --- RESUMEN DE VALORES CENTRADOS CON ESPACIO REDUCIDO ---
+        if not df_p.empty:
+            ultimo_total = df_p['total'].iloc[-1]
+            ultimo_retorno = df_p['retorno'].iloc[-1]
+            color_retorno = "#00e676" if ultimo_retorno >= 0 else "#ff5252"
+        
+            st.markdown(f"""
+                <div style="text-align: center; margin-bottom: -25px;">
+                    <p style="font-size: 50px; font-weight: bold; margin-bottom: -20px; color: white;">
+                        ${ultimo_total:,.2f}
+                    </p>
+                    <p style="font-size: 25px; font-weight: 500; color: {color_retorno}; margin-top: 0px;">
+                        ${ultimo_retorno:,.2f} USD
+                    </p>
+                </div>
+            """, unsafe_allow_html=True)
+
         # Gráfico
         fig = go.Figure()
-        df_p = df_r[df_r['broker'].isin(br_sel)].groupby('fecha').sum(numeric_only=True).reset_index()
         
-        # --- LÓGICA DE RANGO TEMPORAL POR DEFECTO (1 AÑO) ---
+        # Lógica de Rango Temporal (1 Año)
         ultima_f = pd.to_datetime(df_p['fecha']).max()
         inicio_f = ultima_f - pd.DateOffset(years=1)
-        # Aseguramos que el inicio no sea anterior a los primeros datos disponibles
         primera_f = pd.to_datetime(df_p['fecha']).min()
         if inicio_f < primera_f:
             inicio_f = primera_f
 
-        # Métricas principales (Líneas delgadas width=1.5)
+        # Métricas principales
         if "Total" in met_sel: fig.add_trace(go.Scatter(x=df_p['fecha'], y=df_p['total'], name="TOTAL", line=dict(color='white', width=1.5)))
         if "Retorno" in met_sel: fig.add_trace(go.Scatter(x=df_p['fecha'], y=df_p['retorno'], name="RETORNO", line=dict(color='#00e676', width=1.5)))
         if "Caja" in met_sel: fig.add_trace(go.Scatter(x=df_p['fecha'], y=df_p['caja'], name="CAJA", line=dict(dash='dash', color='#ff9100', width=1.5)))
         if "Capital Invertido" in met_sel: fig.add_trace(go.Scatter(x=df_p['fecha'], y=df_p['capital_invertido'], name="CAP. INVERTIDO", line=dict(color='gray', dash='dot', width=1.5)))
 
-        # --- LÓGICA DE ACCIONES ---
+        # Lógica de Acciones
         if ver_acciones:
             tickers_a_mostrar = tk_sel if tk_sel else df_h['ticker'].unique()
             for tk in tickers_a_mostrar:
@@ -244,42 +262,51 @@ with tab_graficos:
                 df_tk = pd.merge(df_p[['fecha']], df_tk, on='fecha', how='left')
                 
                 fig.add_trace(go.Scatter(
-                    x=df_tk['fecha'], 
-                    y=df_tk['valor'], 
-                    name=f"Valor: {tk}", 
-                    line=dict(width=1), 
-                    connectgaps=False
+                    x=df_tk['fecha'], y=df_tk['valor'], 
+                    name=f"Valor: {tk}", line=dict(width=1), connectgaps=False
                 ))
 
                 if tk_sel:
                     fig.add_trace(go.Scatter(
-                        x=df_tk['fecha'], 
-                        y=df_tk['monto_total'], 
-                        name=f"Invertido: {tk}", 
-                        line=dict(width=1, dash='dot'), 
-                        opacity=0.6,
-                        connectgaps=False
+                        x=df_tk['fecha'], y=df_tk['monto_total'], 
+                        name=f"Inv: {tk}", line=dict(width=1, dash='dot'), 
+                        opacity=0.6, connectgaps=False
                     ))
 
-        # --- DISEÑO Y BOTONES ---
+        # --- DISEÑO OPTIMIZADO: LEYENDA ABAJO Y MÁRGENES REDUCIDOS ---
         fig.update_xaxes(
-            range=[inicio_f, ultima_f], # ESTABLECE EL RANGO INICIAL
-            rangeselector=dict(buttons=list([
-                dict(count=1, label="1m", step="month", stepmode="backward"),
-                dict(count=6, label="6m", step="month", stepmode="backward"),
-                dict(count=1, label="1y", step="year", stepmode="backward"),
-                dict(count=5, label="5y", step="year", stepmode="backward"),
-                dict(step="all", label="Máx")
-            ]), bgcolor="#1E1E1E", activecolor="#2E7D32", y=1.05)
+            range=[inicio_f, ultima_f],
+            rangeselector=dict(
+                buttons=list([
+                    dict(count=1, label="1m", step="month", stepmode="backward"),
+                    dict(count=6, label="6m", step="month", stepmode="backward"),
+                    dict(count=1, label="1y", step="year", stepmode="backward"),
+                    dict(count=5, label="5y", step="year", stepmode="backward"),
+                    dict(step="all", label="Máx")
+                ]), 
+                bgcolor="#1E1E1E", 
+                activecolor="#2E7D32", 
+                y=1.01 # Bajamos el selector para que esté más cerca del eje
+            )
         )
 
         fig.update_layout(
-            template="plotly_dark", height=650, hovermode="x unified",
+            template="plotly_dark", 
+            height=650, 
+            hovermode="x unified",
+            margin=dict(t=10, b=80, l=10, r=10), # Reducimos margen superior a 10px
             yaxis=dict(tickformat=".2f"),
-            legend=dict(orientation="h", yanchor="bottom", y=1.12, xanchor="right", x=1)
+            # Leyenda abajo y centrada
+            legend=dict(
+                orientation="h",
+                yanchor="top",
+                y=-0.15,
+                xanchor="center",
+                x=0.5
+            )
         )
         fig.update_traces(hovertemplate='%{y:.2f}')
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("📜 Detalle Diario")
         mostrar_tabla_estilizada(df_h.sort_values(by="fecha", ascending=False), "historico")
@@ -303,11 +330,27 @@ with tab_divisas:
     
     df_r = obtener_df(database.Resumen_cartera_diaria)
     if not df_r.empty:
-        fig_clp = go.Figure()
-        
         # 1. Preparación de Datos Totales
         df_total = df_r.groupby('fecha').sum(numeric_only=True).reset_index()
 
+        # --- RESUMEN DE VALORES EN PESOS (CLP) ---
+        ultimo_total_clp = df_total['total_pesos'].iloc[-1]
+        ultimo_retorno_clp = df_total['retorno_pesos'].iloc[-1]
+        color_retorno = "#00e676" if ultimo_retorno_clp >= 0 else "#ff5252"
+        
+        st.markdown(f"""
+            <div style="text-align: center; margin-bottom: -25px;">
+                <p style="font-size: 50px; font-weight: bold; margin-bottom: -20px; color: white;">
+                    ${ultimo_total_clp:,.0f}
+                </p>
+                <p style="font-size: 25px; font-weight: 500; color: {color_retorno}; margin-top: 0px;">
+                    ${ultimo_retorno_clp:,.0f} CLP
+                </p>
+            </div>
+        """, unsafe_allow_html=True)
+
+        fig_clp = go.Figure()
+        
         # 2. Líneas Consolidadas (Al fondo)
         fig_clp.add_trace(go.Scatter(x=df_total['fecha'], y=df_total['retorno_pesos'], name="TOTAL Retorno CLP", line=dict(color='#00e676', width=1.5, dash='dot'), opacity=0.4))
         fig_clp.add_trace(go.Scatter(x=df_total['fecha'], y=df_total['capital_invertido_pesos'], name="TOTAL Inv. CLP", line=dict(color='white', dash='dash', width=2)))
@@ -322,7 +365,6 @@ with tab_divisas:
         
         # 4. Configuración de Botones Temporales y Estilo
         fig_clp.update_xaxes(
-            # Se elimina el atributo 'range' para mostrar todo el historial por defecto
             rangeselector=dict(
                 buttons=list([
                     dict(count=1, label="1m", step="month", stepmode="backward"),
@@ -341,19 +383,20 @@ with tab_divisas:
             template="plotly_dark", 
             height=650, 
             hovermode="x unified", 
+            margin=dict(t=10, b=80, l=10, r=10), # Ajuste de margen para reducir espacio
             yaxis_title="Pesos ($)",
-            yaxis=dict(tickformat=".0f"), # Sin decimales para pesos
-            # Leyenda posicionada a la derecha del gráfico
+            yaxis=dict(tickformat=".0f"), 
+            # Leyenda abajo y centrada
             legend=dict(
-                orientation="v", 
-                yanchor="top", 
-                y=1, 
-                xanchor="left", 
-                x=1.02
+                orientation="h",
+                yanchor="top",
+                y=-0.15,
+                xanchor="center",
+                x=0.5
             )
         )
         
-        fig_clp.update_traces(hovertemplate='%{y:.0f}') # Hover sin decimales
+        fig_clp.update_traces(hovertemplate='%{y:.0f}')
         st.plotly_chart(fig_clp, use_container_width=True)
     
     st.divider()
