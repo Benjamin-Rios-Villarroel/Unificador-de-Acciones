@@ -65,3 +65,14 @@ class Historico_diario(Base):
     precio_cierre = Column(Float)   # Cierre diario 
     cantidad = Column(Float)        # Cantidad de acciones en portafolio
     valor = Column(Float)           # Valor de las acciones
+
+class Resumen_cartera_diaria(Base):
+    __tablename__ = "resumen_cartera_diaria"
+    id = Column(Integer, primary_key=True, index=True)
+    fecha = Column(String)    # YYYY-MM-DD
+    broker = Column(String)   # Racional, Zesty, etc.
+    valor_acciones = Column(Float)
+    caja = Column(Float)
+    total = Column(Float)
+    capital_invertido = Column(Float)
+    retorno = Column(Float)

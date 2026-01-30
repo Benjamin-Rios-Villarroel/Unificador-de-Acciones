@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func
 import numpy as np
 import pytz
+import plotly.graph_objects as go
 
 # Configuración de página y base de datos
 st.set_page_config(page_title="Unificador de Acciones", layout="wide")
@@ -274,3 +275,110 @@ with tab_resumen:
 with tab_historico:
     st.header("Valor Diario del Portafolio")
     mostrar_tabla_estilizada(obtener_df(database.Historico_diario), "historico")
+
+# --- FUNCIÓN PARA CALCULAR MÉTRICAS DIARIAS ---
+def sincronizar_resumen_cartera(db):
+    # 1. Cargar todos los datos necesarios
+    df_acc = obtener_df(database.Transacciones_acciones)
+    df_div = obtener_df(database.Trasacciones_divisas)
+    df_pas = obtener_df(database.Ingreso_pasivo)
+    df_hist = obtener_df(database.Historico_diario) # Esta debe estar llena primero
+    
+    # Validar que existan datos mínimos para empezar
+    if df_acc.empty and df_div.empty:
+        st.warning("No hay transacciones suficientes para generar el gráfico.")
+        return
+
+    # Limpiar tabla para evitar duplicados al recalcular
+    db.query(database.Resumen_cartera_diaria).delete()
+    db.commit()
+    
+    # 2. Encontrar la fecha de la primera transacción histórica
+    fechas_posibles = []
+    if not df_acc.empty: fechas_posibles.append(pd.to_datetime(df_acc['fecha']).min())
+    if not df_div.empty: fechas_posibles.append(pd.to_datetime(df_div['fecha']).min())
+    
+    fecha_inicio = min(fechas_posibles).date()
+    hoy = datetime.now().date()
+    
+    # Obtener lista de todos los brokers involucrados
+    brokers = pd.concat([df_acc['broker'], df_div['broker']]).unique().tolist()
+    
+    # 3. Bucle diario (Desde el inicio hasta hoy)
+    for fecha_actual in pd.date_range(fecha_inicio, hoy):
+        f_str = fecha_actual.strftime("%Y-%m-%d")
+        
+        for br in brokers:
+            # --- CÁLCULO DE CAJA (Efectivo disponible en el bróker) ---
+            # Dinero metido/sacado vía divisas
+            div_f = df_div[(df_div['broker'] == br) & (pd.to_datetime(df_div['fecha']) <= fecha_actual)]
+            usd_inyectado = div_f.apply(lambda x: x['cantidad'] if x['tipo_transaccion'] == 'compra' else -x['cantidad'], axis=1).sum()
+            
+            # Dinero movido por compra/venta de acciones
+            acc_f = df_acc[(df_acc['broker'] == br) & (pd.to_datetime(df_acc['fecha']) <= fecha_actual)]
+            usd_flujo_acc = acc_f.apply(lambda x: x['monto_total'] if x['tipo_transaccion'] == 'venta' else -x['monto_total'], axis=1).sum()
+            
+            # Dinero ganado por dividendos/intereses
+            pas_f = df_pas[(df_pas['broker'] == br) & (pd.to_datetime(df_pas['fecha']) <= fecha_actual)]
+            usd_pasivos = pas_f['monto'].sum() if not pas_f.empty else 0
+            
+            caja_dia = usd_inyectado + usd_flujo_acc + usd_pasivos
+            
+            # --- VALOR DE LAS ACCIONES ESE DÍA ---
+            val_acc_dia = df_hist[(df_hist['broker'] == br) & (df_hist['fecha'] == f_str)]['valor'].sum()
+            
+            # --- TOTAL Y RETORNO ---
+            total_dia = val_acc_dia + caja_dia
+            retorno_dia = total_dia - usd_inyectado # Ganancia neta sobre capital aportado
+            
+            # Guardar en la base de datos
+            nueva_metrica = database.Resumen_cartera_diaria(
+                fecha=f_str,
+                broker=br,
+                valor_acciones=float(val_acc_dia),
+                caja=float(caja_dia),
+                total=float(total_dia),
+                capital_invertido=float(usd_inyectado),
+                retorno=float(retorno_dia)
+            )
+            db.add(nueva_metrica)
+            
+    db.commit()
+    st.success(f"Métricas calculadas desde {fecha_inicio} hasta hoy.")
+
+# --- PESTAÑA DE GRÁFICOS ---
+with tab_historico: # O puedes crear una nueva tab_graficos
+    st.header("📈 Análisis de Rendimiento")
+    
+    if st.button("🔄 Recalcular Métricas"):
+        sincronizar_resumen_cartera(db)
+        st.rerun()
+
+    df_r = obtener_df(database.Resumen_cartera_diaria)
+    df_h = obtener_df(database.Historico_diario)
+
+    if not df_r.empty:
+        # Filtros Multiselect
+        c1, c2 = st.columns(2)
+        br_sel = c1.multiselect("Brokers", df_r['broker'].unique(), default=df_r['broker'].unique())
+        metricas = c2.multiselect("Mostrar Métricas", ["Total", "Retorno", "Caja"], default=["Total", "Retorno"])
+        
+        df_p = df_r[df_r['broker'].isin(br_sel)].groupby('fecha').sum(numeric_only=True).reset_index()
+        
+        fig = go.Figure()
+        
+        if "Total" in metricas:
+            fig.add_trace(go.Scatter(x=df_p['fecha'], y=df_p['total'], name="Total Cartera", line=dict(color='white', width=3)))
+        if "Retorno" in metricas:
+            fig.add_trace(go.Scatter(x=df_p['fecha'], y=df_p['retorno'], name="Retorno ($)", line=dict(color='#00e676')))
+        if "Caja" in metricas:
+            fig.add_trace(go.Scatter(x=df_p['fecha'], y=df_p['caja'], name="Caja (Efectivo)", line=dict(dash='dash')))
+
+        # Agregar líneas de acciones individuales
+        if st.checkbox("Ver detalle por Tickers"):
+            for tk in df_h['ticker'].unique():
+                df_tk = df_h[(df_h['ticker'] == tk) & (df_h['broker'].isin(br_sel))].groupby('fecha').sum(numeric_only=True).reset_index()
+                fig.add_trace(go.Scatter(x=df_tk['fecha'], y=df_tk['valor'], name=tk, mode='lines', opacity=0.6))
+
+        fig.update_layout(template="plotly_dark", height=600, hovermode="x unified")
+        st.plotly_chart(fig, width="stretch")
