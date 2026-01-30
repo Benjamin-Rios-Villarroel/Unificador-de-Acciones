@@ -146,7 +146,7 @@ def sincronizar_todo(db):
 # --- INTERFAZ ---
 st.title("📂 Mi Portafolio de Inversiones")
 tab_graficos, tab_acciones, tab_divisas, tab_pasivos, tab_mensual = st.tabs([
-    "📈 Gráficos e Histórico", "📊 Acciones", "💵 Divisas", "💰 Ingresos Pasivos", "🗓️ Resumen Mensual"
+    "📈 Gráficos e Histórico", "📊 Portafolio", "💵 Divisas", "💰 Ingresos Pasivos", "🗓️ Resumen Mensual"
 ])
 
 # 1. PESTAÑA GRÁFICOS (ARRIBA DEL HISTÓRICO)
@@ -243,6 +243,65 @@ with tab_acciones:
 
 # 3. DIVISAS
 with tab_divisas:
+    st.header("📈 Rendimiento en Moneda Local (CLP)")
+    
+    df_r = obtener_df(database.Resumen_cartera_diaria)
+    if not df_r.empty:
+        fig_clp = go.Figure()
+        
+        # 1. Preparación de Datos Totales
+        df_total = df_r.groupby('fecha').sum(numeric_only=True).reset_index()
+
+        # 2. Líneas Consolidadas (Al fondo)
+        fig_clp.add_trace(go.Scatter(x=df_total['fecha'], y=df_total['retorno_pesos'], name="TOTAL Retorno CLP", line=dict(color='#00e676', width=1.5, dash='dot'), opacity=0.4))
+        fig_clp.add_trace(go.Scatter(x=df_total['fecha'], y=df_total['capital_invertido_pesos'], name="TOTAL Inv. CLP", line=dict(color='white', dash='dash', width=2)))
+        fig_clp.add_trace(go.Scatter(x=df_total['fecha'], y=df_total['total_pesos'], name="TOTAL Cartera CLP", line=dict(color='white', width=2)))
+
+        # 3. Líneas por Broker (Encima)
+        for br in df_r['broker'].unique():
+            df_br = df_r[df_r['broker'] == br].sort_values('fecha')
+            fig_clp.add_trace(go.Scatter(x=df_br['fecha'], y=df_br['retorno_pesos'], name=f"Retorno Pesos ({br})", line=dict(width=1, dash='dot')))
+            fig_clp.add_trace(go.Scatter(x=df_br['fecha'], y=df_br['capital_invertido_pesos'], name=f"Inv. Pesos ({br})", line=dict(dash='dash', width=1)))
+            fig_clp.add_trace(go.Scatter(x=df_br['fecha'], y=df_br['total_pesos'], name=f"Total Pesos ({br})", line=dict(width=1.5)))
+        
+        # 4. Configuración de Botones Temporales y Estilo
+        fig_clp.update_xaxes(
+            # Se elimina el atributo 'range' para mostrar todo el historial por defecto
+            rangeselector=dict(
+                buttons=list([
+                    dict(count=1, label="1m", step="month", stepmode="backward"),
+                    dict(count=6, label="6m", step="month", stepmode="backward"),
+                    dict(count=1, label="1y", step="year", stepmode="backward"),
+                    dict(count=5, label="5y", step="year", stepmode="backward"),
+                    dict(step="all", label="Máx")
+                ]),
+                bgcolor="#1E1E1E",
+                activecolor="#2E7D32",
+                y=1.02
+            )
+        )
+
+        fig_clp.update_layout(
+            template="plotly_dark", 
+            height=650, 
+            hovermode="x unified", 
+            yaxis_title="Pesos ($)",
+            yaxis=dict(tickformat=".0f"), # Sin decimales para pesos
+            # Leyenda posicionada a la derecha del gráfico
+            legend=dict(
+                orientation="v", 
+                yanchor="top", 
+                y=1, 
+                xanchor="left", 
+                x=1.02
+            )
+        )
+        
+        fig_clp.update_traces(hovertemplate='%{y:.0f}') # Hover sin decimales
+        st.plotly_chart(fig_clp, use_container_width=True)
+    
+    st.divider()
+    
     st.header("Historial de Divisas")
     with st.form("f_div"):
         c1, c2, c3 = st.columns(3)
