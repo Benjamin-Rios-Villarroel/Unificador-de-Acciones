@@ -65,10 +65,52 @@ def sincronizar_todo(db):
     df_acc = obtener_df(database.Transacciones_acciones)
     if df_acc.empty: return st.warning("Añade transacciones primero.")
 
+    # --- NUEVA LÓGICA: Calcular Costo de Posición (Weighted Average) ---
+    # Ordenamos por fecha para procesar cronológicamente
+    df_acc = df_acc.sort_values(by="fecha")
+    
+    # Calculamos el impacto en el costo para cada transacción
+    cost_impacts = []
+    cash_flows = []
+    saldos_temp = {} # { (broker, ticker): [qty, cost_basis] }
+
+    for _, row in df_acc.iterrows():
+        key = (row['broker'], row['ticker'])
+        if key not in saldos_temp:
+            saldos_temp[key] = [0.0, 0.0]
+        
+        qty_actual, cost_actual = saldos_temp[key]
+        
+        if row['tipo_transaccion'] == 'compra':
+            impacto = row['monto_total']
+            saldos_temp[key][0] += row['cantidad']
+            saldos_temp[key][1] += impacto
+            cash_flows.append(-row['monto_total']) # Dinero que sale de la caja
+        else: # venta
+            # El impacto en el costo es proporcional a lo que se vende del costo base actual
+            if qty_actual > 0:
+                proporcion_vendida = row['cantidad'] / qty_actual
+                impacto = -(cost_actual * proporcion_vendida)
+                saldos_temp[key][0] -= row['cantidad']
+                saldos_temp[key][1] += impacto
+            else:
+                impacto = 0
+            
+            # Si la cantidad queda en cero, reseteamos el costo a cero absoluto
+            if saldos_temp[key][0] < 1e-8:
+                saldos_temp[key] = [0.0, 0.0]
+                
+            cash_flows.append(row['monto_total']) # Dinero que entra a la caja
+            
+        cost_impacts.append(impacto)
+
+    df_acc['cost_impact'] = cost_impacts
+    df_acc['cash_flow'] = cash_flows
+
+    # --- CONTINUACIÓN DE LA SINCRONIZACIÓN ---
     fecha_inicio = pd.to_datetime(df_acc['fecha']).min().date()
     tickers = df_acc['ticker'].unique().tolist()
     
-    # Descarga solo hasta ayer
     data = yf.download(tickers, start=fecha_inicio, end=ayer + timedelta(days=1))['Close']
     data_usdclp = yf.download("CLP=X", start=fecha_inicio, end=ayer + timedelta(days=1))['Close']
     
@@ -84,48 +126,55 @@ def sincronizar_todo(db):
         f_str = fecha_bolsa.strftime("%Y-%m-%d")
         f_dt = fecha_bolsa.date()
         
-        # --- SOLUCIÓN ERROR AMBIGÜEDAD (Tipo de Cambio) ---
+        # Tipo de cambio con corrección de ambigüedad
         try:
             val_d = data_usdclp.loc[fecha_bolsa]
         except KeyError:
             val_d = data_usdclp.asof(fecha_bolsa)
-        
-        # Forzar a valor único si es una Serie
         cambio_actual = val_d.iloc[0] if hasattr(val_d, 'iloc') else val_d
         if pd.isna(cambio_actual): continue
 
-        # --- PROCESAMIENTO DE ACCIONES ---
+        # Transacciones hasta hoy
         t_hoy = df_acc[pd.to_datetime(df_acc['fecha']).dt.date <= f_dt].copy()
-        t_hoy['n_cant'] = t_hoy.apply(lambda x: x['cantidad'] if x['tipo_transaccion'] == 'compra' else -x['cantidad'], axis=1)
-        t_hoy['n_monto'] = t_hoy.apply(lambda x: x['monto_total'] if x['tipo_transaccion'] == 'compra' else -x['monto_total'], axis=1)
         
-        saldos = t_hoy.groupby(['broker', 'ticker']).agg({'n_cant': 'sum', 'n_monto': 'sum'}).reset_index()
+        # Cantidad neta para saber qué acciones hay en cartera
+        t_hoy['n_cant'] = t_hoy.apply(lambda x: x['cantidad'] if x['tipo_transaccion'] == 'compra' else -x['cantidad'], axis=1)
+        
+        # Agrupamos por broker/ticker
+        # n_monto ahora suma los impactos de costo (se resetea al vender y suma al comprar)
+        saldos = t_hoy.groupby(['broker', 'ticker']).agg({
+            'n_cant': 'sum',
+            'cost_impact': 'sum'
+        }).reset_index()
+        
         saldos = saldos[saldos['n_cant'] > 1e-8]
 
         for _, row in saldos.iterrows():
             try:
-                # --- SOLUCIÓN ERROR AMBIGÜEDAD (Precios Acciones) ---
                 p_raw = data.loc[fecha_bolsa, row['ticker']] if len(tickers) > 1 else data.loc[fecha_bolsa]
                 p = p_raw.iloc[0] if hasattr(p_raw, 'iloc') else p_raw
                 if pd.isna(p): continue
                 
                 db.add(database.Historico_diario(
                     fecha=f_str, broker=row['broker'], ticker=row['ticker'], precio_cierre=float(p),
-                    monto_total=float(row['n_monto']), cantidad=float(row['n_cant']), valor=float(p * row['n_cant'])
+                    monto_total=float(row['cost_impact']), # COSTO DE LA POSICIÓN ACTUAL
+                    cantidad=float(row['n_cant']), 
+                    valor=float(p * row['n_cant'])
                 ))
             except: continue
 
-        # --- MÉTRICAS DE CARTERA (USD y CLP) ---
+        # --- MÉTRICAS DE CARTERA ---
         for br in df_acc['broker'].unique():
             df_div_br = df_div[(df_div['broker'] == br) & (pd.to_datetime(df_div['fecha']).dt.date <= f_dt)]
             iny_usd = df_div_br.apply(lambda x: x['cantidad'] if x['tipo_transaccion'] == 'compra' else -x['cantidad'], axis=1).sum()
             iny_clp = df_div_br.apply(lambda x: x['monto_total'] if x['tipo_transaccion'] == 'compra' else -x['monto_total'], axis=1).sum()
             
-            flux_usd = t_hoy[t_hoy['broker'] == br]['n_monto'].sum() * -1
+            # La caja usa el flujo de efectivo real (compras restan, ventas suman)
+            flux_usd = t_hoy[t_hoy['broker'] == br]['cash_flow'].sum()
             divs_usd = df_pas[(df_pas['broker'] == br) & (pd.to_datetime(df_pas['fecha']).dt.date <= f_dt)]['monto'].sum()
             
             caja_usd = iny_usd + flux_usd + divs_usd
-            # Valor acciones USD
+            
             v_acc_usd = saldos[saldos['broker'] == br].apply(
                 lambda x: x['n_cant'] * (data.loc[fecha_bolsa, x['ticker']].iloc[0] if hasattr(data.loc[fecha_bolsa, x['ticker']], 'iloc') else data.loc[fecha_bolsa, x['ticker']]), axis=1).sum()
             
@@ -141,12 +190,12 @@ def sincronizar_todo(db):
                 cambio_dolar=float(cambio_actual)
             ))
     db.commit()
-    st.success("Sincronización histórica (hasta ayer) completada.")
+    st.success("Sincronización completada con corrección de costo de posición.")
 
 # --- INTERFAZ ---
 st.title("📂 Mi Portafolio de Inversiones")
-tab_graficos, tab_acciones, tab_divisas, tab_pasivos, tab_mensual = st.tabs([
-    "📈 Gráficos e Histórico", "📊 Portafolio", "💵 Divisas", "💰 Ingresos Pasivos", "🗓️ Resumen Mensual"
+tab_graficos, tab_acciones, tab_divisas, tab_pasivos = st.tabs([
+    "📈 Gráficos e Histórico", "📊 Portafolio", "💵 Valores Histórico", "💰 Ingresos Pasivos"
 ])
 
 # 1. PESTAÑA GRÁFICOS (ARRIBA DEL HISTÓRICO)
@@ -173,6 +222,14 @@ with tab_graficos:
         fig = go.Figure()
         df_p = df_r[df_r['broker'].isin(br_sel)].groupby('fecha').sum(numeric_only=True).reset_index()
         
+        # --- LÓGICA DE RANGO TEMPORAL POR DEFECTO (1 AÑO) ---
+        ultima_f = pd.to_datetime(df_p['fecha']).max()
+        inicio_f = ultima_f - pd.DateOffset(years=1)
+        # Aseguramos que el inicio no sea anterior a los primeros datos disponibles
+        primera_f = pd.to_datetime(df_p['fecha']).min()
+        if inicio_f < primera_f:
+            inicio_f = primera_f
+
         # Métricas principales (Líneas delgadas width=1.5)
         if "Total" in met_sel: fig.add_trace(go.Scatter(x=df_p['fecha'], y=df_p['total'], name="TOTAL", line=dict(color='white', width=1.5)))
         if "Retorno" in met_sel: fig.add_trace(go.Scatter(x=df_p['fecha'], y=df_p['retorno'], name="RETORNO", line=dict(color='#00e676', width=1.5)))
@@ -181,14 +238,11 @@ with tab_graficos:
 
         # --- LÓGICA DE ACCIONES ---
         if ver_acciones:
-            # Si no hay selección, mostramos todos los tickers disponibles
             tickers_a_mostrar = tk_sel if tk_sel else df_h['ticker'].unique()
             for tk in tickers_a_mostrar:
-                # Filtrar historial por ticker y bróker
                 df_tk = df_h[(df_h['ticker'] == tk) & (df_h['broker'].isin(br_sel))].groupby('fecha').sum(numeric_only=True).reset_index()
                 df_tk = pd.merge(df_p[['fecha']], df_tk, on='fecha', how='left')
                 
-                # 1. Línea de Valor Actual (Sólida)
                 fig.add_trace(go.Scatter(
                     x=df_tk['fecha'], 
                     y=df_tk['valor'], 
@@ -197,7 +251,6 @@ with tab_graficos:
                     connectgaps=False
                 ))
 
-                # 2. Línea de Monto Invertido (Punteada - Solo si el ticker fue seleccionado explícitamente)
                 if tk_sel:
                     fig.add_trace(go.Scatter(
                         x=df_tk['fecha'], 
@@ -209,13 +262,16 @@ with tab_graficos:
                     ))
 
         # --- DISEÑO Y BOTONES ---
-        fig.update_xaxes(rangeselector=dict(buttons=list([
-            dict(count=1, label="1m", step="month", stepmode="backward"),
-            dict(count=6, label="6m", step="month", stepmode="backward"),
-            dict(count=1, label="1y", step="year", stepmode="backward"),
-            dict(count=5, label="5y", step="year", stepmode="backward"),
-            dict(step="all", label="Máx")
-        ]), bgcolor="#1E1E1E", activecolor="#2E7D32", y=1.05))
+        fig.update_xaxes(
+            range=[inicio_f, ultima_f], # ESTABLECE EL RANGO INICIAL
+            rangeselector=dict(buttons=list([
+                dict(count=1, label="1m", step="month", stepmode="backward"),
+                dict(count=6, label="6m", step="month", stepmode="backward"),
+                dict(count=1, label="1y", step="year", stepmode="backward"),
+                dict(count=5, label="5y", step="year", stepmode="backward"),
+                dict(step="all", label="Máx")
+            ]), bgcolor="#1E1E1E", activecolor="#2E7D32", y=1.05)
+        )
 
         fig.update_layout(
             template="plotly_dark", height=650, hovermode="x unified",
@@ -301,7 +357,7 @@ with tab_divisas:
         st.plotly_chart(fig_clp, use_container_width=True)
     
     st.divider()
-    
+
     st.header("Historial de Divisas")
     with st.form("f_div"):
         c1, c2, c3 = st.columns(3)
@@ -325,15 +381,3 @@ with tab_pasivos:
             db.add(database.Ingreso_pasivo(fecha=str(fp), broker=bp, tipo_ingreso=tp, ticker=tk, monto=m))
             db.commit(); st.rerun()
     mostrar_tabla_estilizada(obtener_df(database.Ingreso_pasivo), "pasivos")
-
-# 5. RESUMEN MENSUAL
-with tab_mensual:
-    st.header("Cierre de Mes Oficial")
-    with st.form("form_mes"):
-        col1, col2 = st.columns(2)
-        fm = col1.text_input("Mes (YYYY-MM)"); bm = col1.selectbox("Broker", ["Racional", "Zesty"])
-        mp = col2.number_input("Monto Pesos (CLP)"); md = col2.number_input("Monto Dólares (USD)")
-        if st.form_submit_button("Guardar Cierre Mensual"):
-            db.add(database.Resumen_mensual(fecha=fm, broker=bm, monto_pesos=mp, monto_dolares=md))
-            db.commit(); st.rerun()
-    mostrar_tabla_estilizada(obtener_df(database.Resumen_mensual), "resumen_mensual")
