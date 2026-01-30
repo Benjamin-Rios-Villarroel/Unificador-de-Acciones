@@ -63,6 +63,7 @@ class Historico_diario(Base):
     broker = Column(String)         # Ej: "Racional", "Zesty"
     ticker = Column(String)         # Ej: "AAPL"
     precio_cierre = Column(Float)   # Cierre diario 
+    monto_total = Column(Float)     # Monto total comprado en USD
     cantidad = Column(Float)        # Cantidad de acciones en portafolio
     valor = Column(Float)           # Valor de las acciones
 
