@@ -60,17 +60,20 @@ def mostrar_tabla_estilizada(df, tipo_tabla="acciones"):
 
 # --- SINCRONIZACIÓN (HASTA AYER / DÍAS DE BOLSA) ---
 def sincronizar_todo(db):
+    # Límite estricto: Ayer
     ayer = datetime.now().date() - timedelta(days=1)
     df_acc = obtener_df(database.Transacciones_acciones)
-    if df_acc.empty: return st.warning("Añade transacciones para sincronizar.")
+    if df_acc.empty: return st.warning("Añade transacciones primero.")
 
     fecha_inicio = pd.to_datetime(df_acc['fecha']).min().date()
     tickers = df_acc['ticker'].unique().tolist()
-    data = yf.download(tickers, start=fecha_inicio, end=ayer + timedelta(days=1))['Close']
     
-    if data.empty: return
+    # Descarga solo hasta ayer
+    data = yf.download(tickers, start=fecha_inicio, end=ayer + timedelta(days=1))['Close']
+    data_usdclp = yf.download("CLP=X", start=fecha_inicio, end=ayer + timedelta(days=1))['Close']
+    
+    if data.empty or data_usdclp.empty: return
 
-    # Limpiar tablas para reconstrucción
     db.query(database.Historico_diario).delete()
     db.query(database.Resumen_cartera_diaria).delete()
     
@@ -81,56 +84,64 @@ def sincronizar_todo(db):
         f_str = fecha_bolsa.strftime("%Y-%m-%d")
         f_dt = fecha_bolsa.date()
         
-        # 1. Obtener transacciones hasta la fecha procesada
+        # --- SOLUCIÓN ERROR AMBIGÜEDAD (Tipo de Cambio) ---
+        try:
+            val_d = data_usdclp.loc[fecha_bolsa]
+        except KeyError:
+            val_d = data_usdclp.asof(fecha_bolsa)
+        
+        # Forzar a valor único si es una Serie
+        cambio_actual = val_d.iloc[0] if hasattr(val_d, 'iloc') else val_d
+        if pd.isna(cambio_actual): continue
+
+        # --- PROCESAMIENTO DE ACCIONES ---
         t_hoy = df_acc[pd.to_datetime(df_acc['fecha']).dt.date <= f_dt].copy()
+        t_hoy['n_cant'] = t_hoy.apply(lambda x: x['cantidad'] if x['tipo_transaccion'] == 'compra' else -x['cantidad'], axis=1)
+        t_hoy['n_monto'] = t_hoy.apply(lambda x: x['monto_total'] if x['tipo_transaccion'] == 'compra' else -x['monto_total'], axis=1)
         
-        # Calculamos el neto de cantidad y el monto invertido neto
-        t_hoy['neto_cant'] = t_hoy.apply(lambda x: x['cantidad'] if x['tipo_transaccion'] == 'compra' else -x['cantidad'], axis=1)
-        t_hoy['neto_monto'] = t_hoy.apply(lambda x: x['monto_total'] if x['tipo_transaccion'] == 'compra' else -x['monto_total'], axis=1)
-        
-        # Agrupamos para obtener los totales por broker y acción
-        saldos = t_hoy.groupby(['broker', 'ticker']).agg({
-            'neto_cant': 'sum',
-            'neto_monto': 'sum'
-        }).reset_index()
-        
-        saldos = saldos[saldos['neto_cant'] > 1e-8]
+        saldos = t_hoy.groupby(['broker', 'ticker']).agg({'n_cant': 'sum', 'n_monto': 'sum'}).reset_index()
+        saldos = saldos[saldos['n_cant'] > 1e-8]
 
         for _, row in saldos.iterrows():
             try:
-                p = data.loc[fecha_bolsa, row['ticker']] if len(tickers) > 1 else data.loc[fecha_bolsa]
+                # --- SOLUCIÓN ERROR AMBIGÜEDAD (Precios Acciones) ---
+                p_raw = data.loc[fecha_bolsa, row['ticker']] if len(tickers) > 1 else data.loc[fecha_bolsa]
+                p = p_raw.iloc[0] if hasattr(p_raw, 'iloc') else p_raw
                 if pd.isna(p): continue
                 
-                # Guardamos incluyendo el nuevo monto_total
                 db.add(database.Historico_diario(
-                    fecha=f_str, 
-                    broker=row['broker'], 
-                    ticker=row['ticker'], 
-                    precio_cierre=float(p),
-                    monto_total=float(row['neto_monto']), # DINERO INVERTIDO
-                    cantidad=float(row['neto_cant']), 
-                    valor=float(p * row['neto_cant'])
+                    fecha=f_str, broker=row['broker'], ticker=row['ticker'], precio_cierre=float(p),
+                    monto_total=float(row['n_monto']), cantidad=float(row['n_cant']), valor=float(p * row['n_cant'])
                 ))
             except: continue
 
-        # 2. Métricas de Cartera (Caja y Totales)
+        # --- MÉTRICAS DE CARTERA (USD y CLP) ---
         for br in df_acc['broker'].unique():
-            iny = df_div[(df_div['broker'] == br) & (pd.to_datetime(df_div['fecha']).dt.date <= f_dt)].apply(
-                lambda x: x['cantidad'] if x['tipo_transaccion'] == 'compra' else -x['cantidad'], axis=1).sum()
+            df_div_br = df_div[(df_div['broker'] == br) & (pd.to_datetime(df_div['fecha']).dt.date <= f_dt)]
+            iny_usd = df_div_br.apply(lambda x: x['cantidad'] if x['tipo_transaccion'] == 'compra' else -x['cantidad'], axis=1).sum()
+            iny_clp = df_div_br.apply(lambda x: x['monto_total'] if x['tipo_transaccion'] == 'compra' else -x['monto_total'], axis=1).sum()
             
-            flux = t_hoy[t_hoy['broker'] == br]['neto_monto'].sum() * -1 # El flujo para la caja es opuesto a la inversión
-            divs = df_pas[(df_pas['broker'] == br) & (pd.to_datetime(df_pas['fecha']).dt.date <= f_dt)]['monto'].sum()
+            flux_usd = t_hoy[t_hoy['broker'] == br]['n_monto'].sum() * -1
+            divs_usd = df_pas[(df_pas['broker'] == br) & (pd.to_datetime(df_pas['fecha']).dt.date <= f_dt)]['monto'].sum()
             
-            caja = iny + flux + divs
-            v_acc = saldos[saldos['broker'] == br].apply(
-                lambda x: x['neto_cant'] * (data.loc[fecha_bolsa, x['ticker']] if len(tickers) > 1 else data.loc[fecha_bolsa]), axis=1).sum()
+            caja_usd = iny_usd + flux_usd + divs_usd
+            # Valor acciones USD
+            v_acc_usd = saldos[saldos['broker'] == br].apply(
+                lambda x: x['n_cant'] * (data.loc[fecha_bolsa, x['ticker']].iloc[0] if hasattr(data.loc[fecha_bolsa, x['ticker']], 'iloc') else data.loc[fecha_bolsa, x['ticker']]), axis=1).sum()
             
-            total = v_acc + caja
+            total_usd = v_acc_usd + caja_usd
+            total_clp = total_usd * cambio_actual
+            retorno_clp = total_clp - iny_clp
+            
             db.add(database.Resumen_cartera_diaria(
-                fecha=f_str, broker=br, valor_acciones=v_acc, caja=caja, 
-                total=total, capital_invertido=iny, retorno=total - iny
+                fecha=f_str, broker=br, valor_acciones=float(v_acc_usd), caja=float(caja_usd),
+                total=float(total_usd), total_pesos=float(total_clp),
+                capital_invertido=float(iny_usd), capital_invertido_pesos=float(iny_clp),
+                retorno=float(total_usd - iny_usd), retorno_pesos=float(retorno_clp),
+                cambio_dolar=float(cambio_actual)
             ))
     db.commit()
+    st.success("Sincronización histórica (hasta ayer) completada.")
 
 # --- INTERFAZ ---
 st.title("📂 Mi Portafolio de Inversiones")
@@ -223,7 +234,7 @@ with tab_acciones:
     with st.form("form_acc"):
         col1, col2, col3 = st.columns(3)
         f = col1.date_input("Fecha"); t = col1.text_input("Ticker").upper()
-        tipo = col2.selectbox("Operación", ["compra", "venta"]); br = col2.selectbox("Broker", ["Racional", "Zesty", "Fintual", "Otro"])
+        tipo = col2.selectbox("Operación", ["compra", "venta"]); br = col2.selectbox("Broker", ["Racional", "Zesty"])
         mt = col3.number_input("Monto Total (USD)"); pr = col3.number_input("Precio Acción"); ct = col3.number_input("Cantidad", format="%.8f")
         if st.form_submit_button("Guardar"):
             db.add(database.Transacciones_acciones(fecha=str(f), broker=br, tipo_transaccion=tipo, ticker=t, monto_total=mt, precio=pr, cantidad=ct))
@@ -235,7 +246,7 @@ with tab_divisas:
     st.header("Historial de Divisas")
     with st.form("f_div"):
         c1, c2, c3 = st.columns(3)
-        fd = c1.date_input("Fecha"); bd = c1.selectbox("Broker", ["Racional", "Zesty", "BancoEstado"])
+        fd = c1.date_input("Fecha"); bd = c1.selectbox("Broker", ["Racional", "Zesty"])
         td = c2.selectbox("Tipo", ["compra", "venta"]); mc = c2.number_input("Monto CLP")
         tc = c3.number_input("Tipo Cambio"); cu = c3.number_input("Cantidad USD")
         if st.form_submit_button("Registrar"):
@@ -248,7 +259,7 @@ with tab_pasivos:
     st.header("Dividendos e Intereses")
     with st.form("f_pas"):
         c1, c2, c3 = st.columns(3)
-        fp = c1.date_input("Fecha"); bp = c1.selectbox("Broker", ["Racional", "Zesty", "Fintual"])
+        fp = c1.date_input("Fecha"); bp = c1.selectbox("Broker", ["Racional", "Zesty"])
         tp = c2.selectbox("Tipo", ["dividendo", "interés"]); tk = c2.text_input("Ticker").upper()
         m = c3.number_input("Monto USD")
         if st.form_submit_button("Añadir"):
@@ -261,7 +272,7 @@ with tab_mensual:
     st.header("Cierre de Mes Oficial")
     with st.form("form_mes"):
         col1, col2 = st.columns(2)
-        fm = col1.text_input("Mes (YYYY-MM)"); bm = col1.selectbox("Broker", ["Racional", "Zesty", "Fintual"])
+        fm = col1.text_input("Mes (YYYY-MM)"); bm = col1.selectbox("Broker", ["Racional", "Zesty"])
         mp = col2.number_input("Monto Pesos (CLP)"); md = col2.number_input("Monto Dólares (USD)")
         if st.form_submit_button("Guardar Cierre Mensual"):
             db.add(database.Resumen_mensual(fecha=fm, broker=bm, monto_pesos=mp, monto_dolares=md))

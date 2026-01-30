@@ -70,10 +70,14 @@ class Historico_diario(Base):
 class Resumen_cartera_diaria(Base):
     __tablename__ = "resumen_cartera_diaria"
     id = Column(Integer, primary_key=True, index=True)
-    fecha = Column(String)    # YYYY-MM-DD
-    broker = Column(String)   # Racional, Zesty, etc.
-    valor_acciones = Column(Float)
+    fecha = Column(String)                  # YYYY-MM-DD
+    broker = Column(String)                 # Racional, Zesty, etc.
+    valor_acciones = Column(Float)  
     caja = Column(Float)
-    total = Column(Float)
-    capital_invertido = Column(Float)
-    retorno = Column(Float)
+    total = Column(Float)                   # Total en dólares (USD)
+    total_pesos = Column(Float)             # Total en pesos (CLP)
+    capital_invertido = Column(Float)       # Capital invertido en dólares (USD)
+    capital_invertido_pesos = Column(Float) # Capital invertido en pesos (CLP)
+    retorno = Column(Float)                 # Retorno en dólares (USD)
+    retorno_pesos = Column(Float)           # Retorno en pesos (CLP)
+    cambio_dolar = Column(Float)            # Valor del dólar en pesos CLP/USD
