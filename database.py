@@ -56,8 +56,9 @@ class Resumen_mensual(Base):
     monto_pesos = Column(Float)     # Cantidad mensual en pesos
     monto_dolares = Column(Float)   # Cantidad mensual en dólares
 
-class Historico_diario(Base):
-    __tablename__ = "historico_diario"
+# Tabla para los resumenes de acciones diarios separados por broker
+class Resumen_acciones_diario(Base):
+    __tablename__ = "resumen_acciones_diario"
     id = Column(Integer, primary_key=True, index=True)
     fecha = Column(String)          # YYYY-MM-DD
     broker = Column(String)         # Ej: "Racional", "Zesty"
@@ -67,13 +68,39 @@ class Historico_diario(Base):
     cantidad = Column(Float)        # Cantidad de acciones en portafolio
     valor = Column(Float)           # Valor de las acciones
 
+# Tabla para los totales de los resumenes de acciones diarios
+class Resumen_acciones_diario_total(Base):
+    __tablename__ = "resumen_acciones_diario_total"
+    id = Column(Integer, primary_key=True, index=True)
+    fecha = Column(String)          # YYYY-MM-DD
+    ticker = Column(String)         # Ej: "AAPL"
+    monto_total = Column(Float)     # Monto total comprado en USD
+    cantidad = Column(Float)        # Cantidad de acciones en portafolio
+    valor = Column(Float)           # Valor de las acciones
+
+# Tabla para los resumenes de la cartera diaria separados por broker
 class Resumen_cartera_diaria(Base):
     __tablename__ = "resumen_cartera_diaria"
     id = Column(Integer, primary_key=True, index=True)
     fecha = Column(String)                  # YYYY-MM-DD
     broker = Column(String)                 # Racional, Zesty, etc.
-    valor_acciones = Column(Float)  
-    caja = Column(Float)
+    valor_acciones = Column(Float)          # Total valor acciones
+    caja = Column(Float)                    # Total en la caja
+    total = Column(Float)                   # Total en dólares (USD)
+    total_pesos = Column(Float)             # Total en pesos (CLP)
+    capital_invertido = Column(Float)       # Capital invertido en dólares (USD)
+    capital_invertido_pesos = Column(Float) # Capital invertido en pesos (CLP)
+    retorno = Column(Float)                 # Retorno en dólares (USD)
+    retorno_pesos = Column(Float)           # Retorno en pesos (CLP)
+    cambio_dolar = Column(Float)            # Valor del dólar en pesos CLP/USD
+
+# Tabla para los totales de los resumenes de la cartera diaria 
+class Resumen_cartera_diaria_total(Base):
+    __tablename__ = "resumen_cartera_diaria_total"
+    id = Column(Integer, primary_key=True, index=True)
+    fecha = Column(String)                  # YYYY-MM-DD
+    valor_acciones = Column(Float)          # Total valor acciones
+    caja = Column(Float)                    # Total en la caja
     total = Column(Float)                   # Total en dólares (USD)
     total_pesos = Column(Float)             # Total en pesos (CLP)
     capital_invertido = Column(Float)       # Capital invertido en dólares (USD)

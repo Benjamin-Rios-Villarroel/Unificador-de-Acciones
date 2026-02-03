@@ -194,11 +194,11 @@ def sincronizar_todo(db):
 
 # --- INTERFAZ ---
 st.title("📂 Mi Portafolio de Inversiones")
-tab_graficos, tab_acciones, tab_divisas, tab_pasivos = st.tabs([
-    "📈 Gráficos e Histórico", "📊 Portafolio", "💵 Valores Histórico", "💰 Ingresos Pasivos"
+tab_acciones, tab_graficos, tab_divisas, tab_pasivos = st.tabs([
+    "📊 Portafolio", "📈 Histórico", "💵 Valores Histórico", "💰 Ingresos Pasivos"
 ])
 
-# 1. PESTAÑA GRÁFICOS (ARRIBA DEL HISTÓRICO)
+# 1. PESTAÑA GRÁFICOS 
 with tab_graficos:
     st.header("Análisis de Rendimiento")
     if st.button("🔄 Sincronizar (Hasta Ayer)"):
@@ -292,7 +292,7 @@ with tab_graficos:
 
         fig.update_layout(
             template="plotly_dark", 
-            height=650, 
+            height=550, 
             hovermode="x unified",
             margin=dict(t=10, b=80, l=10, r=10), # Reducimos margen superior a 10px
             yaxis=dict(tickformat=".2f"),
@@ -313,7 +313,132 @@ with tab_graficos:
 
 # 2. ACCIONES
 with tab_acciones:
-    st.header("Transacciones de Acciones")
+    st.header("📊 Resumen de Tenencias (Tiempo Real)")
+    
+    df_h = obtener_df(database.Historico_diario)
+    df_r = obtener_df(database.Resumen_cartera_diaria)
+    
+    if not df_h.empty and not df_r.empty:
+        # 1. Datos base del último cierre
+        ultima_fecha = df_h['fecha'].max()
+        df_h_hoy = df_h[df_h['fecha'] == ultima_fecha].copy()
+        df_r_hoy = df_r[df_r['fecha'] == ultima_fecha].copy()
+        
+        # 2. Consolidar stocks
+        port = df_h_hoy.groupby('ticker').agg({
+            'cantidad': 'sum',
+            'monto_total': 'sum'
+        }).reset_index()
+        
+        # --- LÓGICA TIEMPO REAL ---
+        tickers = port['ticker'].unique().tolist()
+        with st.spinner("Actualizando precios en vivo..."):
+            try:
+                data_live = yf.download(tickers, period="1d", interval="1m")['Close'].iloc[-1]
+                if len(tickers) > 1:
+                    port['Cotización'] = port['ticker'].map(data_live)
+                else:
+                    port['Cotización'] = data_live
+            except:
+                st.warning("Precios en vivo no disponibles. Usando último cierre.")
+                port['Cotización'] = port['ticker'].map(df_h_hoy.groupby('ticker')['precio_cierre'].mean())
+
+        # 3. Cálculos de activos
+        port['Valor Actual'] = port['cantidad'] * port['Cotización']
+        port['P. Promedio'] = port['monto_total'] / port['cantidad']
+        port['Ganancia'] = port['Valor Actual'] - port['monto_total']
+        port['% Ganancia'] = (port['Ganancia'] / port['monto_total']) * 100
+        
+        # 4. Cálculos para los apartados superiores
+        total_efectivo = df_r_hoy['caja'].sum()
+        total_acciones_val = port['Valor Actual'].sum()
+        total_acciones_inv = port['monto_total'].sum()
+        total_acciones_gan = port['Ganancia'].sum()
+        
+        # Total actual de toda la cartera (Valor de mercado + Efectivo)
+        total_mercado = total_acciones_val + total_efectivo
+        # Capital invertido actual (Depósitos totales)
+        total_deposito = df_r_hoy['capital_invertido'].sum()
+        
+        # --- NUEVA LÓGICA DE ALH (ATH) BASADA EN RETORNO ---
+        # 1. Encontramos el máximo retorno histórico
+        max_retorno_hist = df_r['retorno'].max()
+        
+        # 2. El ATH Ajustado es: Capital actual + el mejor retorno que hemos tenido
+        # Si el retorno actual en vivo es mayor al histórico, usamos el actual
+        retorno_actual_vivo = total_mercado - total_deposito
+        mejor_retorno = max(max_retorno_hist, retorno_actual_vivo)
+        
+        total_ath_ajustado = total_deposito + mejor_retorno
+        diferencia_ath = total_mercado - total_ath_ajustado
+        
+        porc_caja = (total_efectivo / total_mercado) * 100 if total_mercado != 0 else 0
+
+        # --- APARTADOS DE RESUMEN SUPERIOR (3 COLUMNAS) ---
+        c1, c2, c3 = st.columns(3)
+        
+        with c1:
+            st.markdown(f"""
+                <div style="background-color: #1e1e1e; padding: 15px; border-radius: 10px; border-left: 5px solid #ff9100;">
+                    <p style="margin: 0; font-size: 14px; color: gray;">Efectivo en Caja</p>
+                    <h3 style="margin: 0; color: white;">$ {total_efectivo:,.2f} USD</h3>
+                    <p style="margin: 0; font-size: 13px; color: #ff9100;">{porc_caja:.2f}% del Portafolio Total</p>
+                </div>
+            """, unsafe_allow_html=True)
+            
+        with c2:
+            color_gan = "#00e676" if total_acciones_gan >= 0 else "#ff5252"
+            st.markdown(f"""
+                <div style="background-color: #1e1e1e; padding: 15px; border-radius: 10px; border-left: 5px solid #2e7d32;">
+                    <p style="margin: 0; font-size: 14px; color: gray;">Totales Acciones</p>
+                    <span style="font-size: 13px; color: white;">Inv: $ {total_acciones_inv:,.2f} | Val: $ {total_mercado:,.2f}</span>
+                    <h3 style="margin: 0; color: {color_gan};">$ {total_acciones_gan:,.2f} USD Ganancia</h3>
+                </div>
+            """, unsafe_allow_html=True)
+
+        with c3:
+            # Color rojo si estamos por debajo del máximo de rendimiento, verde si estamos marcando récord
+            color_ath = "#ff5252" if diferencia_ath < -0.01 else "#00e676"
+            st.markdown(f"""
+                <div style="background-color: #1e1e1e; padding: 15px; border-radius: 10px; border-left: 5px solid #00bcd4;">
+                    <p style="margin: 0; font-size: 14px; color: gray;">Máximo Histórico Ajustado</p>
+                    <h3 style="margin: 0; color: white;">$ {total_ath_ajustado:,.2f} USD</h3>
+                    <p style="margin: 0; font-size: 13px; color: {color_ath};">Dif: $ {diferencia_ath:,.2f} USD</p>
+                </div>
+            """, unsafe_allow_html=True)
+
+        st.write("---") 
+
+        # 5. Porcentaje sobre el total de acciones
+        port['% Portafolio'] = (port['Valor Actual'] / total_acciones_val) * 100
+
+        # --- ORDENAMIENTO POR GANANCIA ---
+        port['Ganancia'] = pd.to_numeric(port['Ganancia'], errors='coerce')
+        port = port.sort_values(by="Ganancia", ascending=False).reset_index(drop=True)
+
+        # --- TABLA DE ACCIONES ---
+        port_display = port.rename(columns={'ticker': 'Empresa', 'cantidad': 'Cantidad', 'monto_total': 'Cap. Invertido'})
+        cols = ["Empresa", "Cantidad", "Cap. Invertido", "P. Promedio", "Cotización", "Valor Actual", "% Portafolio", "Ganancia", "% Ganancia"]
+        
+        def estilo_tabla(df_style):
+            return df_style.format({
+                'Cantidad': '{:,.8f}', 'Cap. Invertido': '$ {:,.2f}', 'P. Promedio': '$ {:,.2f}',
+                'Cotización': '$ {:,.2f}', 'Valor Actual': '$ {:,.2f}', '% Portafolio': '{:.2f} %',
+                'Ganancia': '$ {:,.2f}', '% Ganancia': '{:.2f} %'
+            }, na_rep="-").map(
+                lambda x: 'color: #00e676' if isinstance(x, (float, int)) and x > 0 else 'color: #ff5252' if isinstance(x, (float, int)) and x < 0 else '',
+                subset=['Ganancia', '% Ganancia']
+            )
+
+        st.dataframe(estilo_tabla(port_display[cols].style), use_container_width=True, height="content", hide_index=True)
+
+    else:
+        st.info("Sincroniza los datos en la pestaña de Gráficos.")
+
+    st.divider()
+    
+    # Formulario de Registro (Existente)
+    st.subheader("Registrar Nueva Transacción")
     with st.form("form_acc"):
         col1, col2, col3 = st.columns(3)
         f = col1.date_input("Fecha"); t = col1.text_input("Ticker").upper()
@@ -322,6 +447,7 @@ with tab_acciones:
         if st.form_submit_button("Guardar"):
             db.add(database.Transacciones_acciones(fecha=str(f), broker=br, tipo_transaccion=tipo, ticker=t, monto_total=mt, precio=pr, cantidad=ct))
             db.commit(); st.rerun()
+            
     mostrar_tabla_estilizada(obtener_df(database.Transacciones_acciones), "acciones")
 
 # 3. DIVISAS
@@ -333,37 +459,68 @@ with tab_divisas:
         # 1. Preparación de Datos Totales
         df_total = df_r.groupby('fecha').sum(numeric_only=True).reset_index()
 
-        # --- RESUMEN DE VALORES EN PESOS (CLP) ---
+        # --- CÁLCULOS PARA TARJETAS EN CLP ---
         ultimo_total_clp = df_total['total_pesos'].iloc[-1]
         ultimo_retorno_clp = df_total['retorno_pesos'].iloc[-1]
-        color_retorno = "#00e676" if ultimo_retorno_clp >= 0 else "#ff5252"
+        ultimo_invertido_clp = df_total['capital_invertido_pesos'].iloc[-1]
         
-        st.markdown(f"""
-            <div style="text-align: center; margin-bottom: -25px;">
-                <p style="font-size: 50px; font-weight: bold; margin-bottom: -20px; color: white;">
-                    ${ultimo_total_clp:,.0f}
-                </p>
-                <p style="font-size: 25px; font-weight: 500; color: {color_retorno}; margin-top: 0px;">
-                    ${ultimo_retorno_clp:,.0f} CLP
-                </p>
-            </div>
-        """, unsafe_allow_html=True)
+        # Lógica ATH Ajustado: Capital Invertido Actual + Mejor Retorno Histórico en Pesos
+        max_retorno_clp_hist = df_total['retorno_pesos'].max()
+        mejor_retorno_clp = max(max_retorno_clp_hist, ultimo_retorno_clp)
+        
+        ath_clp_ajustado = ultimo_invertido_clp + mejor_retorno_clp
+        diferencia_ath_clp = ultimo_total_clp - ath_clp_ajustado
+        
+        # --- APARTADOS DE RESUMEN SUPERIOR (3 COLUMNAS) ---
+        c1, c2, c3 = st.columns(3)
+        
+        with c1:
+            st.markdown(f"""
+                <div style="background-color: #1e1e1e; padding: 15px; border-radius: 10px; border-left: 5px solid #ffffff;">
+                    <p style="margin: 0; font-size: 14px; color: gray;">Patrimonio Total</p>
+                    <h3 style="margin: 0; color: white;">$ {ultimo_total_clp:,.0f}</h3>
+                    <p style="margin: 0; font-size: 13px; color: gray;">Valor actual en CLP</p>
+                </div>
+            """, unsafe_allow_html=True)
+            
+        with c2:
+            color_ret = "#00e676" if ultimo_retorno_clp >= 0 else "#ff5252"
+            st.markdown(f"""
+                <div style="background-color: #1e1e1e; padding: 15px; border-radius: 10px; border-left: 5px solid #2e7d32;">
+                    <p style="margin: 0; font-size: 14px; color: gray;">Rentabilidad Total</p>
+                    <h3 style="margin: 0; color: {color_ret};">$ {ultimo_retorno_clp:,.0f}</h3>
+                    <p style="margin: 0; font-size: 13px; color: gray;">Ganancia/Pérdida neta</p>
+                </div>
+            """, unsafe_allow_html=True)
 
+        with c3:
+            color_ath = "#00e676" if diferencia_ath_clp >= -1 else "#ff5252"
+            st.markdown(f"""
+                <div style="background-color: #1e1e1e; padding: 15px; border-radius: 10px; border-left: 5px solid #00bcd4;">
+                    <p style="margin: 0; font-size: 14px; color: gray;">Máximo Histórico (ATH)</p>
+                    <h3 style="margin: 0; color: white;">$ {ath_clp_ajustado:,.0f}</h3>
+                    <p style="margin: 0; font-size: 13px; color: {color_ath};">Dif: $ {diferencia_ath_clp:,.0f} CLP</p>
+                </div>
+            """, unsafe_allow_html=True)
+
+        st.write("") # Espaciador
+
+        # --- GRÁFICO ---
         fig_clp = go.Figure()
         
-        # 2. Líneas Consolidadas (Al fondo)
+        # 2. Líneas Consolidadas
         fig_clp.add_trace(go.Scatter(x=df_total['fecha'], y=df_total['retorno_pesos'], name="TOTAL Retorno CLP", line=dict(color='#00e676', width=1.5, dash='dot'), opacity=0.4))
         fig_clp.add_trace(go.Scatter(x=df_total['fecha'], y=df_total['capital_invertido_pesos'], name="TOTAL Inv. CLP", line=dict(color='white', dash='dash', width=2)))
         fig_clp.add_trace(go.Scatter(x=df_total['fecha'], y=df_total['total_pesos'], name="TOTAL Cartera CLP", line=dict(color='white', width=2)))
 
-        # 3. Líneas por Broker (Encima)
+        # 3. Líneas por Broker
         for br in df_r['broker'].unique():
             df_br = df_r[df_r['broker'] == br].sort_values('fecha')
             fig_clp.add_trace(go.Scatter(x=df_br['fecha'], y=df_br['retorno_pesos'], name=f"Retorno Pesos ({br})", line=dict(width=1, dash='dot')))
             fig_clp.add_trace(go.Scatter(x=df_br['fecha'], y=df_br['capital_invertido_pesos'], name=f"Inv. Pesos ({br})", line=dict(dash='dash', width=1)))
             fig_clp.add_trace(go.Scatter(x=df_br['fecha'], y=df_br['total_pesos'], name=f"Total Pesos ({br})", line=dict(width=1.5)))
         
-        # 4. Configuración de Botones Temporales y Estilo
+        # 4. Configuración
         fig_clp.update_xaxes(
             rangeselector=dict(
                 buttons=list([
@@ -373,27 +530,15 @@ with tab_divisas:
                     dict(count=5, label="5y", step="year", stepmode="backward"),
                     dict(step="all", label="Máx")
                 ]),
-                bgcolor="#1E1E1E",
-                activecolor="#2E7D32",
-                y=1.02
+                bgcolor="#1E1E1E", activecolor="#2E7D32", y=1.02
             )
         )
 
         fig_clp.update_layout(
-            template="plotly_dark", 
-            height=650, 
-            hovermode="x unified", 
-            margin=dict(t=10, b=80, l=10, r=10), # Ajuste de margen para reducir espacio
-            yaxis_title="Pesos ($)",
-            yaxis=dict(tickformat=".0f"), 
-            # Leyenda abajo y centrada
-            legend=dict(
-                orientation="h",
-                yanchor="top",
-                y=-0.15,
-                xanchor="center",
-                x=0.5
-            )
+            template="plotly_dark", height=550, hovermode="x unified", 
+            margin=dict(t=10, b=80, l=10, r=10),
+            yaxis_title="Pesos ($)", yaxis=dict(tickformat=".0f"), 
+            legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5)
         )
         
         fig_clp.update_traces(hovertemplate='%{y:.0f}')
