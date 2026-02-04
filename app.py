@@ -60,153 +60,175 @@ def mostrar_tabla_estilizada(df, tipo_tabla="acciones"):
 
 # --- SINCRONIZACIÓN (HASTA AYER / DÍAS DE BOLSA) ---
 def sincronizar_todo(db):
-    # Límite estricto: Ayer
-    ayer = datetime.now().date() - timedelta(days=1)
+    # 1. Determinar la fecha límite según el cierre de NYSE (17:00 ET)
+    tz_ny = pytz.timezone('US/Eastern')
+    ahora_ny = datetime.now(tz_ny)
+    fecha_limite = ahora_ny.date() if ahora_ny.hour >= 17 else ahora_ny.date() - timedelta(days=1)
+    
+    # Cargar datos base
     df_acc = obtener_df(database.Transacciones_acciones)
-    if df_acc.empty: return st.warning("Añade transacciones primero.")
-
-    # --- NUEVA LÓGICA: Calcular Costo de Posición (Weighted Average) ---
-    # Ordenamos por fecha para procesar cronológicamente
-    df_acc = df_acc.sort_values(by="fecha")
-    
-    # Calculamos el impacto en el costo para cada transacción
-    cost_impacts = []
-    cash_flows = []
-    saldos_temp = {} # { (broker, ticker): [qty, cost_basis] }
-
-    for _, row in df_acc.iterrows():
-        key = (row['broker'], row['ticker'])
-        if key not in saldos_temp:
-            saldos_temp[key] = [0.0, 0.0]
-        
-        qty_actual, cost_actual = saldos_temp[key]
-        
-        if row['tipo_transaccion'] == 'compra':
-            impacto = row['monto_total']
-            saldos_temp[key][0] += row['cantidad']
-            saldos_temp[key][1] += impacto
-            cash_flows.append(-row['monto_total']) # Dinero que sale de la caja
-        else: # venta
-            # El impacto en el costo es proporcional a lo que se vende del costo base actual
-            if qty_actual > 0:
-                proporcion_vendida = row['cantidad'] / qty_actual
-                impacto = -(cost_actual * proporcion_vendida)
-                saldos_temp[key][0] -= row['cantidad']
-                saldos_temp[key][1] += impacto
-            else:
-                impacto = 0
-            
-            # Si la cantidad queda en cero, reseteamos el costo a cero absoluto
-            if saldos_temp[key][0] < 1e-8:
-                saldos_temp[key] = [0.0, 0.0]
-                
-            cash_flows.append(row['monto_total']) # Dinero que entra a la caja
-            
-        cost_impacts.append(impacto)
-
-    df_acc['cost_impact'] = cost_impacts
-    df_acc['cash_flow'] = cash_flows
-
-    # --- CONTINUACIÓN DE LA SINCRONIZACIÓN ---
-    fecha_inicio = pd.to_datetime(df_acc['fecha']).min().date()
-    tickers = df_acc['ticker'].unique().tolist()
-    
-    data = yf.download(tickers, start=fecha_inicio, end=ayer + timedelta(days=1))['Close']
-    data_usdclp = yf.download("CLP=X", start=fecha_inicio, end=ayer + timedelta(days=1))['Close']
-    
-    if data.empty or data_usdclp.empty: return
-
-    db.query(database.Historico_diario).delete()
-    db.query(database.Resumen_cartera_diaria).delete()
-    
     df_div = obtener_df(database.Trasacciones_divisas)
     df_pas = obtener_df(database.Ingreso_pasivo)
+
+    if df_acc.empty and df_div.empty and df_pas.empty:
+        return st.warning("Añade transacciones, divisas o ingresos pasivos primero.")
+
+    # Identificar todos los brokers únicos entre todas las tablas
+    brokers_totales = set()
+    if not df_acc.empty: brokers_totales.update(df_acc['broker'].unique())
+    if not df_div.empty: brokers_totales.update(df_div['broker'].unique())
+    if not df_pas.empty: brokers_totales.update(df_pas['broker'].unique())
+
+    # --- LÓGICA DE COSTO DE POSICIÓN (WAC) ---
+    cost_impacts, cash_flows = [], []
+    if not df_acc.empty:
+        df_acc = df_acc.sort_values(by="fecha")
+        saldos_temp = {} 
+        for _, row in df_acc.iterrows():
+            key = (row['broker'], row['ticker'])
+            if key not in saldos_temp: saldos_temp[key] = [0.0, 0.0]
+            qty_act, cost_act = saldos_temp[key]
+            
+            if row['tipo_transaccion'] == 'compra':
+                impacto = row['monto_total']
+                saldos_temp[key][0] += row['cantidad']
+                saldos_temp[key][1] += impacto
+                cash_flows.append(-row['monto_total'])
+            else: # venta
+                impacto = -(cost_act * (row['cantidad'] / qty_act)) if qty_act > 0 else 0
+                saldos_temp[key][0] -= row['cantidad']
+                saldos_temp[key][1] += impacto
+                if saldos_temp[key][0] < 1e-8: saldos_temp[key] = [0.0, 0.0]
+                cash_flows.append(row['monto_total'])
+            cost_impacts.append(impacto)
+        df_acc['cost_impact'] = cost_impacts
+        df_acc['cash_flow'] = cash_flows
+
+    # 2. DESCARGA DE DATOS
+    fechas = []
+    if not df_acc.empty: fechas.append(pd.to_datetime(df_acc['fecha']).min())
+    if not df_div.empty: fechas.append(pd.to_datetime(df_div['fecha']).min())
+    if not df_pas.empty: fechas.append(pd.to_datetime(df_pas['fecha']).min())
+    fecha_inicio = min(fechas).date()
+    
+    tickers = df_acc['ticker'].unique().tolist() if not df_acc.empty else []
+    
+    # Descarga masiva de precios y tipo de cambio
+    data = yf.download(tickers, start=fecha_inicio, end=fecha_limite + timedelta(days=1))['Close'] if tickers else pd.DataFrame(index=pd.date_range(fecha_inicio, fecha_limite))
+    data_usdclp = yf.download("CLP=X", start=fecha_inicio, end=fecha_limite + timedelta(days=1))['Close']
+    
+    # LIMPIEZA DE TABLAS DE RESUMEN
+    db.query(database.Resumen_acciones_diario).delete()
+    db.query(database.Resumen_acciones_diario_total).delete()
+    db.query(database.Resumen_cartera_diaria).delete()
+    db.query(database.Resumen_cartera_diaria_total).delete()
 
     for fecha_bolsa in data.index:
         f_str = fecha_bolsa.strftime("%Y-%m-%d")
         f_dt = fecha_bolsa.date()
         
-        # Tipo de cambio con corrección de ambigüedad
         try:
             val_d = data_usdclp.loc[fecha_bolsa]
-        except KeyError:
+        except:
             val_d = data_usdclp.asof(fecha_bolsa)
-        cambio_actual = val_d.iloc[0] if hasattr(val_d, 'iloc') else val_d
-        if pd.isna(cambio_actual): continue
-
-        # Transacciones hasta hoy
-        t_hoy = df_acc[pd.to_datetime(df_acc['fecha']).dt.date <= f_dt].copy()
+        cambio_actual = float(val_d.iloc[0]) if hasattr(val_d, 'iloc') else float(val_d)
         
-        # Cantidad neta para saber qué acciones hay en cartera
-        t_hoy['n_cant'] = t_hoy.apply(lambda x: x['cantidad'] if x['tipo_transaccion'] == 'compra' else -x['cantidad'], axis=1)
+        t_hoy = df_acc[pd.to_datetime(df_acc['fecha']).dt.date <= f_dt].copy() if not df_acc.empty else pd.DataFrame()
         
-        # Agrupamos por broker/ticker
-        # n_monto ahora suma los impactos de costo (se resetea al vender y suma al comprar)
-        saldos = t_hoy.groupby(['broker', 'ticker']).agg({
-            'n_cant': 'sum',
-            'cost_impact': 'sum'
-        }).reset_index()
-        
-        saldos = saldos[saldos['n_cant'] > 1e-8]
-
-        for _, row in saldos.iterrows():
-            try:
-                p_raw = data.loc[fecha_bolsa, row['ticker']] if len(tickers) > 1 else data.loc[fecha_bolsa]
-                p = p_raw.iloc[0] if hasattr(p_raw, 'iloc') else p_raw
-                if pd.isna(p): continue
-                
-                db.add(database.Historico_diario(
-                    fecha=f_str, broker=row['broker'], ticker=row['ticker'], precio_cierre=float(p),
-                    monto_total=float(row['cost_impact']), # COSTO DE LA POSICIÓN ACTUAL
-                    cantidad=float(row['n_cant']), 
-                    valor=float(p * row['n_cant'])
-                ))
-            except: continue
-
-        # --- MÉTRICAS DE CARTERA ---
-        for br in df_acc['broker'].unique():
-            df_div_br = df_div[(df_div['broker'] == br) & (pd.to_datetime(df_div['fecha']).dt.date <= f_dt)]
-            iny_usd = df_div_br.apply(lambda x: x['cantidad'] if x['tipo_transaccion'] == 'compra' else -x['cantidad'], axis=1).sum()
-            iny_clp = df_div_br.apply(lambda x: x['monto_total'] if x['tipo_transaccion'] == 'compra' else -x['monto_total'], axis=1).sum()
+        precios_dia = {}
+        if not t_hoy.empty:
+            t_hoy['n_cant'] = t_hoy.apply(lambda x: x['cantidad'] if x['tipo_transaccion'] == 'compra' else -x['cantidad'], axis=1)
+            saldos = t_hoy.groupby(['broker', 'ticker']).agg({'n_cant': 'sum', 'cost_impact': 'sum'}).reset_index()
+            saldos = saldos[saldos['n_cant'] > 1e-8]
             
-            # La caja usa el flujo de efectivo real (compras restan, ventas suman)
-            flux_usd = t_hoy[t_hoy['broker'] == br]['cash_flow'].sum()
-            divs_usd = df_pas[(df_pas['broker'] == br) & (pd.to_datetime(df_pas['fecha']).dt.date <= f_dt)]['monto'].sum()
+            for tk in tickers:
+                try:
+                    p_val = data.loc[fecha_bolsa, tk] if isinstance(data, pd.DataFrame) else data.loc[fecha_bolsa]
+                    precios_dia[tk] = float(p_val.iloc[0]) if hasattr(p_val, 'iloc') else float(p_val)
+                except: precios_dia[tk] = 0.0
+            
+            # A y B: Resumen de Acciones (Bróker y Total)
+            for _, row in saldos.iterrows():
+                p = precios_dia.get(row['ticker'], 0.0)
+                db.add(database.Resumen_acciones_diario(
+                    fecha=f_str, broker=row['broker'], ticker=row['ticker'], precio_cierre=p,
+                    monto_total=float(row['cost_impact']), cantidad=float(row['n_cant']), valor=float(p * row['n_cant'])
+                ))
+            
+            s_tot = saldos.groupby('ticker').agg({'n_cant': 'sum', 'cost_impact': 'sum'}).reset_index()
+            for _, row in s_tot.iterrows():
+                p = precios_dia.get(row['ticker'], 0.0)
+                db.add(database.Resumen_acciones_diario_total(
+                    fecha=f_str, ticker=row['ticker'], monto_total=float(row['cost_impact']), 
+                    cantidad=float(row['n_cant']), valor=float(p * row['n_cant'])
+                ))
+        else:
+            saldos = pd.DataFrame()
+
+        # C. Resumen Cartera por Bróker
+        for br in brokers_totales:
+            df_div_br = df_div[(df_div['broker'] == br) & (pd.to_datetime(df_div['fecha']).dt.date <= f_dt)] if not df_div.empty else pd.DataFrame()
+            iny_usd = df_div_br.apply(lambda x: x['cantidad'] if x['tipo_transaccion'] == 'compra' else -x['cantidad'], axis=1).sum() if not df_div_br.empty else 0.0
+            iny_clp = df_div_br.apply(lambda x: x['monto_total'] if x['tipo_transaccion'] == 'compra' else -x['monto_total'], axis=1).sum() if not df_div_br.empty else 0.0
+            
+            flux_usd = t_hoy[t_hoy['broker'] == br]['cash_flow'].sum() if not t_hoy.empty else 0.0
+            divs_usd = df_pas[(df_pas['broker'] == br) & (pd.to_datetime(df_pas['fecha']).dt.date <= f_dt)]['monto'].sum() if not df_pas.empty else 0.0
             
             caja_usd = iny_usd + flux_usd + divs_usd
             
-            v_acc_usd = saldos[saldos['broker'] == br].apply(
-                lambda x: x['n_cant'] * (data.loc[fecha_bolsa, x['ticker']].iloc[0] if hasattr(data.loc[fecha_bolsa, x['ticker']], 'iloc') else data.loc[fecha_bolsa, x['ticker']]), axis=1).sum()
+            s_br = saldos[saldos['broker'] == br] if not saldos.empty else pd.DataFrame()
+            v_acc_usd = s_br.apply(lambda x: x['n_cant'] * precios_dia.get(x['ticker'], 0.0), axis=1).sum() if not s_br.empty else 0.0
             
             total_usd = v_acc_usd + caja_usd
             total_clp = total_usd * cambio_actual
-            retorno_clp = total_clp - iny_clp
             
-            db.add(database.Resumen_cartera_diaria(
-                fecha=f_str, broker=br, valor_acciones=float(v_acc_usd), caja=float(caja_usd),
-                total=float(total_usd), total_pesos=float(total_clp),
-                capital_invertido=float(iny_usd), capital_invertido_pesos=float(iny_clp),
-                retorno=float(total_usd - iny_usd), retorno_pesos=float(retorno_clp),
+            # FILTRO: Solo registrar si el total es mayor a cero
+            if total_usd > 0:
+                db.add(database.Resumen_cartera_diaria(
+                    fecha=f_str, broker=br, valor_acciones=float(v_acc_usd), caja=float(caja_usd),
+                    total=float(total_usd), total_pesos=float(total_clp),
+                    capital_invertido=float(iny_usd), capital_invertido_pesos=float(iny_clp),
+                    retorno=float(total_usd - iny_usd), retorno_pesos=float(total_clp - iny_clp),
+                    cambio_dolar=float(cambio_actual)
+                ))
+
+        # D. Resumen Cartera Total
+        t_v_acc = saldos.apply(lambda x: x['n_cant'] * precios_dia.get(x['ticker'], 0.0), axis=1).sum() if not saldos.empty else 0.0
+        iny_usd_all = df_div[pd.to_datetime(df_div['fecha']).dt.date <= f_dt].apply(lambda x: x['cantidad'] if x['tipo_transaccion'] == 'compra' else -x['cantidad'], axis=1).sum() if not df_div.empty else 0.0
+        iny_clp_all = df_div[pd.to_datetime(df_div['fecha']).dt.date <= f_dt].apply(lambda x: x['monto_total'] if x['tipo_transaccion'] == 'compra' else -x['monto_total'], axis=1).sum() if not df_div.empty else 0.0
+        caja_all = iny_usd_all + (t_hoy['cash_flow'].sum() if not t_hoy.empty else 0.0) + (df_pas[pd.to_datetime(df_pas['fecha']).dt.date <= f_dt]['monto'].sum() if not df_pas.empty else 0.0)
+        
+        total_usd_all = t_v_acc + caja_all
+        total_clp_all = total_usd_all * cambio_actual
+        
+        # FILTRO: Solo registrar si el total global es mayor a cero
+        if total_usd_all > 0:
+            db.add(database.Resumen_cartera_diaria_total(
+                fecha=f_str, valor_acciones=float(t_v_acc), caja=float(caja_all),
+                total=float(total_usd_all), total_pesos=float(total_clp_all),
+                capital_invertido=float(iny_usd_all), capital_invertido_pesos=float(iny_clp_all),
+                retorno=float(total_usd_all - iny_usd_all), retorno_pesos=float(total_clp_all - iny_clp_all),
                 cambio_dolar=float(cambio_actual)
             ))
+        
     db.commit()
-    st.success("Sincronización completada con corrección de costo de posición.")
+    st.success(f"Sincronización completada. Datos procesados hasta: {fecha_limite}")
 
 # --- INTERFAZ ---
 st.title("📂 Mi Portafolio de Inversiones")
 tab_acciones, tab_graficos, tab_divisas, tab_pasivos = st.tabs([
-    "📊 Portafolio", "📈 Histórico", "💵 Valores Histórico", "💰 Ingresos Pasivos"
+    "📊 Portafolio", "📈 Histórico Dólares", "💵 Histórico Pesos", "💰 Ingresos Pasivos"
 ])
 
 # 1. PESTAÑA GRÁFICOS 
 with tab_graficos:
     st.header("Análisis de Rendimiento")
-    if st.button("🔄 Sincronizar (Hasta Ayer)"):
+    if st.button("🔄 Sincronizar Portafolio"):
         with st.spinner("Procesando datos..."): sincronizar_todo(db)
         st.rerun()
 
     df_r = obtener_df(database.Resumen_cartera_diaria)
-    df_h = obtener_df(database.Historico_diario)
+    df_h = obtener_df(database.Resumen_acciones_diario)
 
     if not df_r.empty:
         # --- FILTROS ---
@@ -313,9 +335,9 @@ with tab_graficos:
 
 # 2. ACCIONES
 with tab_acciones:
-    st.header("📊 Resumen de Tenencias (Tiempo Real)")
+    st.header("📊 Portafolio")
     
-    df_h = obtener_df(database.Historico_diario)
+    df_h = obtener_df(database.Resumen_acciones_diario)
     df_r = obtener_df(database.Resumen_cartera_diaria)
     
     if not df_h.empty and not df_r.empty:
